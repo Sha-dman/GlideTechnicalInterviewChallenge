@@ -7,30 +7,23 @@ import { sessions, users } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 
 export async function createContext(opts: CreateNextContextOptions | FetchCreateContextFnOptions) {
-  // Handle different adapter types
   let req: any;
   let res: any;
 
   if ("req" in opts && "res" in opts) {
-    // Next.js adapter
     req = opts.req;
     res = opts.res;
   } else {
-    // Fetch adapter
     req = opts.req;
     res = opts.resHeaders;
   }
 
-  // Get the session token
   let token: string | undefined;
 
-  // For App Router, we need to read cookies from the request headers
   let cookieHeader = "";
   if (req.headers.cookie) {
-    // Next.js Pages request
     cookieHeader = req.headers.cookie;
   } else if (req.headers.get) {
-    // Fetch request (App Router)
     cookieHeader = req.headers.get("cookie") || "";
   }
 
@@ -54,15 +47,25 @@ export async function createContext(opts: CreateNextContextOptions | FetchCreate
 
       const session = await db.select().from(sessions).where(eq(sessions.token, token)).get();
 
-      if (session && new Date(session.expiresAt) > new Date()) {
-        user = await db.select().from(users).where(eq(users.id, decoded.userId)).get();
-        const expiresIn = new Date(session.expiresAt).getTime() - new Date().getTime();
-        if (expiresIn < 60000) {
-          console.warn("Session about to expire");
+      if (session) {
+        const now = Date.now();
+        const expiresAtMs = new Date(session.expiresAt).getTime();
+
+        const earlyExpiryWindow = 60_000; // 1 minute
+
+        // Early expiration fix (PERF-403)
+        if (expiresAtMs - now <= earlyExpiryWindow) {
+          await db.delete(sessions).where(eq(sessions.token, token));
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Session expired" });
+        }
+
+        // Valid session
+        if (expiresAtMs > now) {
+          user = await db.select().from(users).where(eq(users.id, decoded.userId)).get();
         }
       }
     } catch (error) {
-      // Invalid token
+      // Invalid session → ignore
     }
   }
 
